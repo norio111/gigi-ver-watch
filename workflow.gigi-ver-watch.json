@@ -1,0 +1,201 @@
+{
+  "name": "gigi-ver-watch",
+  "meta": {
+    "description": "厚労省『疑義解釈検索ツール』(xlsm) のVer番号を監視し、新版・無断差し替えを検知して通知する。取り込み自体はmed-code-map側のload_gigi.pyが担当し、本ワークフローは検知と通知に徹する。"
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "timezone": "Asia/Tokyo"
+  },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Schedule (毎日 07:00 JST)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-420, 0],
+      "notes": "疑義解釈は改定直後(3-5月)で1-2週おき、7月以降は月1程度。日次で十分に追随でき、取りこぼしも出ない。",
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "days", "triggerAtHour": 7, "triggerAtMinute": 0 }
+          ]
+        }
+      }
+    },
+    {
+      "id": "fetchPage",
+      "name": "掲載ページ取得",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 0],
+      "alwaysOutputData": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "診療報酬関連情報ページ。このページ内の .xlsm リンクは1個だけ（2026-09-15 確認）。",
+      "parameters": {
+        "url": "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryouhoken/newpage_21053.html",
+        "options": {
+          "timeout": 30000,
+          "response": { "response": { "responseFormat": "text" } }
+        }
+      }
+    },
+    {
+      "id": "decide",
+      "name": "Verを抽出して前回と比較",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [20, 0],
+      "notes": "check_gigi_ver.py の decide() と同じ判定をJSで実装。状態は workflow static data に持つ。",
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// 掲載ページから .xlsm リンクを拾い、Ver番号を前回値と比較する。\n// 判定ロジックは check_gigi_ver.py の decide() と同じ。\n\nconst html = $input.first().json.data ?? $input.first().json.body ?? '';\nif (typeof html !== 'string' || html.length < 1000) {\n  throw new Error('HTMLが取得できていない（長さ=' + (html?.length ?? 0) + '）');\n}\n\n// --- .xlsm リンク抽出 ---\nconst re = /href\\s*=\\s*[\"']((?:https?:\\/\\/www\\.mhlw\\.go\\.jp)?\\/content\\/[^\"']*?\\.xlsm)[\"']/gi;\nconst links = [];\nlet m;\nwhile ((m = re.exec(html)) !== null) {\n  const url = m[1].startsWith('http') ? m[1] : 'https://www.mhlw.go.jp' + m[1];\n  if (!links.includes(url)) links.push(url);\n}\n\n// ページ改修は黙って進めず必ず止める\nif (links.length === 0) {\n  throw new Error('ページに .xlsm リンクが無い。掲載場所が変わった可能性あり: ' + $('掲載ページ取得').params.url);\n}\nif (links.length > 1) {\n  throw new Error('.xlsm リンクが複数ある(' + links.length + '件)。どれが疑義解釈ツールか判定不能: ' + JSON.stringify(links));\n}\n\nconst url = links[0];\nconst fname = url.split('/').pop();\n\n// --- Ver パース ---\nconst vm = fname.match(/Ver\\.?\\s*(\\d+(?:\\.\\d+)*)\\.?/i);\nif (!vm) {\n  throw new Error('ファイル名からVerが読めない: ' + fname);\n}\nconst ver = vm[1];\nconst toTuple = (s) => s.split('.').map(Number);\n\n// --- 前回状態 ---\nconst store = $getWorkflowStaticData('global');\nconst prevVer = store.gigiVer ?? null;\n\nfunction compare(a, b) {\n  if (b === null) return 'first_run';\n  const A = toTuple(a), B = toTuple(b);\n  const n = Math.max(A.length, B.length);\n  for (let i = 0; i < n; i++) {\n    const x = A[i] ?? 0, y = B[i] ?? 0;\n    if (x > y) return 'new_version';\n    if (x < y) return 'ver_downgrade';\n  }\n  return 'no_change';\n}\n\nconst status = compare(ver, prevVer);\n\n// Verが下がるのは異常。上書きせず人間に投げる\nif (status === 'ver_downgrade') {\n  throw new Error('Verが退行している: ' + prevVer + ' -> ' + ver + ' （差し戻し or 誤検知。要確認）');\n}\n\nconst reasons = {\n  first_run: '初回実行。現在のVerを記録する',\n  new_version: 'Verが ' + prevVer + ' → ' + ver + ' に上がった（疑義解釈が1回分追加された）',\n  no_change: 'Verは ' + ver + ' のまま',\n};\n\nreturn [{\n  json: {\n    status,\n    url,\n    filename: fname,\n    ver,\n    prev_ver: prevVer,\n    reason: reasons[status],\n    is_new: status === 'new_version' || status === 'first_run',\n    checked_at: new Date().toISOString(),\n  },\n}];"
+      }
+    },
+    {
+      "id": "ifNew",
+      "name": "新版か？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [240, 0],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true },
+              "leftValue": "={{ $json.is_new }}",
+              "rightValue": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "headCheck",
+      "name": "HEADで差し替え確認",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 160],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "notes": "Ver据え置きでも中身が差し替わることがある。1.3MBを毎日落とさずに済むよう、まずHEADでLast-Modified/Content-Lengthだけ見る。",
+      "parameters": {
+        "method": "HEAD",
+        "url": "={{ $json.url }}",
+        "options": {
+          "timeout": 20000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      }
+    },
+    {
+      "id": "detectSilent",
+      "name": "無断差し替えを判定",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 160],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Verが据え置きのまま中身だけ差し替えられたケースを拾う。\n// Last-Modified / Content-Length のどちらかが動いていたら silent_update 候補。\n\nconst prev = $('Verを抽出して前回と比較').first().json;\nconst res = $input.first().json;\nconst headers = res.headers ?? {};\n\nconst lm = headers['last-modified'] ?? null;\nconst cl = headers['content-length'] ?? null;\n\nconst store = $getWorkflowStaticData('global');\nconst prevLm = store.gigiLastModified ?? null;\nconst prevCl = store.gigiContentLength ?? null;\n\n// ヘッダが取れないときは判定できないので安全側（変化ありとみなす）\nconst unknown = lm === null || cl === null || prevLm === null || prevCl === null;\nconst changed = unknown || String(lm) !== String(prevLm) || String(cl) !== String(prevCl);\n\n// 記録は毎回更新する\nstore.gigiLastModified = lm;\nstore.gigiContentLength = cl;\nstore.gigiLastCheckedAt = new Date().toISOString();\n\nreturn [{\n  json: {\n    ...prev,\n    status: changed ? 'silent_update_suspect' : 'no_change',\n    last_modified: lm,\n    content_length: cl,\n    prev_last_modified: prevLm,\n    prev_content_length: prevCl,\n    header_unknown: unknown,\n    needs_human_review: changed,\n    reason: changed\n      ? 'Verは据え置きだが配信ファイルのメタ情報が動いた。中身の差し替えの可能性あり'\n      : 'Ver・ファイルとも変化なし',\n  },\n}];"
+      }
+    },
+    {
+      "id": "ifSilent",
+      "name": "差し替え疑いあり？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 160],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "combinator": "and",
+          "conditions": [
+            {
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true },
+              "leftValue": "={{ $json.needs_human_review }}",
+              "rightValue": ""
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "recordNew",
+      "name": "新Verを記録",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, -160],
+      "notes": "静的データの更新はここだけ。異常系は手前でthrowしているので、ここに来るのは正常な新版のみ。",
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const j = $input.first().json;\nconst store = $getWorkflowStaticData('global');\n\nstore.gigiVer = j.ver;\nstore.gigiUrl = j.url;\nstore.gigiLastCheckedAt = j.checked_at;\nstore.gigiHistory = (store.gigiHistory ?? []).concat([\n  { ver: j.ver, prev_ver: j.prev_ver, detected_at: j.checked_at },\n]).slice(-50);\n\nreturn [{\n  json: {\n    ...j,\n    next_action: 'python load_gigi.py --xlsm data/gigi/' + j.filename + ' --db med_code_map.db',\n    note: 'ダウンロードと取込はmed-code-map側で実行する。取込後、gigi_source テーブルの ver がこのVerと一致することを確認すること。',\n  },\n}];"
+      }
+    },
+    {
+      "id": "notifyNew",
+      "name": "新版を通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [680, -160],
+      "notes": "【P1】通知先（Slack/メール/Discord等）に差し替える。現状はNoOpで実行ログに残るだけ。",
+      "parameters": {}
+    },
+    {
+      "id": "notifySilent",
+      "name": "差し替え疑いを通知",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 80],
+      "notes": "【P1】通知先に差し替える。Ver据え置きの差し替えは公式アナウンスが無いので、気づけるのはこの経路だけ。",
+      "parameters": {}
+    },
+    {
+      "id": "noChange",
+      "name": "変化なし（終了）",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 240],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Schedule (毎日 07:00 JST)": {
+      "main": [[{ "node": "掲載ページ取得", "type": "main", "index": 0 }]]
+    },
+    "掲載ページ取得": {
+      "main": [[{ "node": "Verを抽出して前回と比較", "type": "main", "index": 0 }]]
+    },
+    "Verを抽出して前回と比較": {
+      "main": [[{ "node": "新版か？", "type": "main", "index": 0 }]]
+    },
+    "新版か？": {
+      "main": [
+        [{ "node": "新Verを記録", "type": "main", "index": 0 }],
+        [{ "node": "HEADで差し替え確認", "type": "main", "index": 0 }]
+      ]
+    },
+    "新Verを記録": {
+      "main": [[{ "node": "新版を通知", "type": "main", "index": 0 }]]
+    },
+    "HEADで差し替え確認": {
+      "main": [[{ "node": "無断差し替えを判定", "type": "main", "index": 0 }]]
+    },
+    "無断差し替えを判定": {
+      "main": [[{ "node": "差し替え疑いあり？", "type": "main", "index": 0 }]]
+    },
+    "差し替え疑いあり？": {
+      "main": [
+        [{ "node": "差し替え疑いを通知", "type": "main", "index": 0 }],
+        [{ "node": "変化なし（終了）", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {}
+}

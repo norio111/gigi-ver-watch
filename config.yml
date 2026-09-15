@@ -1,0 +1,50 @@
+# gigi watcher — 厚労省「疑義解釈検索ツール」(xlsm) のVer監視
+#
+# 将来 watcher を1リポジトリに統合したとき、watchers/<name>/config.yml が
+# 並ぶだけの形になるよう、URL・スケジュール・保存先をコードから外に出している。
+
+watcher: gigi
+
+source:
+  # 掲載ページ。この中の .xlsm リンクは1個だけ（2026-09-15 確認）
+  page_url: >-
+    https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryouhoken/newpage_21053.html
+  # ページ内から拾うリンクの条件。1件に絞れなければ異常として停止する
+  link_pattern: '\.xlsm$'
+  expected_link_count: 1
+
+schedule:
+  # 疑義解釈は改定直後(3-5月)で1-2週おき、7月以降は月1程度。
+  # 日次なら取りこぼさず、負荷も小さい。
+  cron: "0 7 * * *"
+  timezone: Asia/Tokyo
+
+http:
+  timeout_sec: 30
+  max_retries: 3
+  retry_wait_sec: 5
+  user_agent: "gigi-ver-watch/1.0 (personal research)"
+
+storage:
+  state_file: state/gigi.json
+  download_dir: data/gigi
+
+download:
+  # 1.3MB を毎日落とさないための制御。
+  # Verが動いたときは必ず取得し、据え置きのときは HEAD のメタ情報が
+  # 変化したときだけ本体を取ってハッシュを照合する。
+  on_new_version: true
+  on_head_change: true
+  on_no_change: false
+
+# 取り込み側（med-code-map）へ渡すコマンド。通知の next_action に出る。
+# {filename} は検知したファイル名に置換される。
+handoff:
+  command: "python load_gigi.py --xlsm data/gigi/{filename} --db med_code_map.db"
+  note: "取込後、gigi_source テーブルの ver が検知したVerと一致することを確認する"
+
+notify:
+  # is_actionable=true のものだけ飛ばす想定。
+  # 送信先は統合時に共通 notify/ へ寄せる。
+  min_severity: info
+  only_actionable: true

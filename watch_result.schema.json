@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/norio111/mhlw-watchers/contracts/watch_result.schema.json",
+  "title": "WatchResult",
+  "description": "厚労省まわりの一次情報を監視するwatcherが共通で吐く結果1件。watcher固有の情報はすべて payload に入れ、トップレベルは通知・集約側が解釈できる項目だけに限定する。将来 watcher を1リポジトリに統合したとき、通知処理を1本化できるようにするための契約。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "watcher",
+    "checked_at",
+    "status",
+    "severity",
+    "is_actionable",
+    "title"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "description": "この契約自体のバージョン。破壊的変更時に上げる。",
+      "const": "1.0"
+    },
+    "watcher": {
+      "description": "watcher識別子。状態ファイル名・ワークフロー名と揃える（例: gigi, chuikyo）。",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "source_url": {
+      "description": "監視対象そのもののURL。通知から一次資料へ直接飛べるようにする。",
+      "type": ["string", "null"],
+      "format": "uri"
+    },
+    "checked_at": {
+      "description": "チェック実行時刻（ISO8601、タイムゾーン付き）。",
+      "type": "string"
+    },
+    "status": {
+      "description": "watcher固有の状態語彙。共通化しない。gigiなら new_version / silent_update / no_change 等、chuikyoなら new_meeting 等。集約側はこの値で分岐せず severity と is_actionable を見ること。",
+      "type": "string",
+      "minLength": 1
+    },
+    "severity": {
+      "description": "通知の重み。info=記録のみ / warn=人が見た方がよい / error=止まっている、必ず人が見る。",
+      "enum": ["info", "warn", "error"]
+    },
+    "is_actionable": {
+      "description": "人間が次の操作をする必要があるか。true のときのみ通知を飛ばす、という運用にできる。",
+      "type": "boolean"
+    },
+    "title": {
+      "description": "通知の1行見出し。これだけ読めば何が起きたか分かる長さにする。",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "reason": {
+      "description": "そう判定した根拠。title より詳しく、人間向け。",
+      "type": ["string", "null"]
+    },
+    "next_action": {
+      "description": "人間がやるべき次の操作。実行できるコマンドがあればそのまま書く。",
+      "type": ["string", "null"]
+    },
+    "error": {
+      "description": "severity=error のときの例外メッセージ。",
+      "type": ["string", "null"]
+    },
+    "payload": {
+      "description": "watcher固有の情報。集約側は中身を解釈しない。gigiなら ver / sha256 / saved_to 等。",
+      "type": "object"
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "watcher": "gigi",
+      "source_url": "https://www.mhlw.go.jp/content/12400000/Ver.1.1.5.xlsm",
+      "checked_at": "2026-09-16T07:00:00+09:00",
+      "status": "new_version",
+      "severity": "info",
+      "is_actionable": true,
+      "title": "疑義解釈検索ツール Ver.1.1.4 → 1.1.5",
+      "reason": "Ver が 1.1.4 → 1.1.5 に上がった（疑義解釈が1回分追加された）",
+      "next_action": "python load_gigi.py --xlsm data/gigi/Ver.1.1.5.xlsm --db med_code_map.db",
+      "error": null,
+      "payload": {
+        "ver": "1.1.5",
+        "prev_ver": "1.1.4",
+        "filename": "Ver.1.1.5.xlsm"
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "watcher": "gigi",
+      "source_url": "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/kenkou_iryou/iryouhoken/newpage_21053.html",
+      "checked_at": "2026-09-16T07:00:00+09:00",
+      "status": "link_missing",
+      "severity": "error",
+      "is_actionable": true,
+      "title": "疑義解釈検索ツールのリンクが見つからない",
+      "reason": "ページに .xlsm リンクが無い",
+      "next_action": "掲載ページの構成が変わっていないか目視で確認する",
+      "error": "ページに .xlsm リンクが無い",
+      "payload": {}
+    }
+  ]
+}

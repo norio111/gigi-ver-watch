@@ -1,0 +1,20 @@
+# 監視の状態（環境ごとに異なる）
+state/
+
+# 取得した配布物（再取得可能・バイナリ）
+data/
+*.xlsm
+*.xlsx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# エディタ・OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
